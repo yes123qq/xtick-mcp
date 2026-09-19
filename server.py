@@ -2,194 +2,107 @@ import os
 from typing import Any
 
 import httpx
-from fastmcp import FastMCP
+from fastmcp import Context, FastMCP
 
 BASE_URL = os.getenv("XTICK_BASE_URL", "https://api.xtick.top").rstrip("/")
 
 mcp = FastMCP(
     "XTick Market Data",
-    instructions=(
-        "Read-only XTick market-data tools. Use daily_kline for daily bars, "
-        "minute_kline for historical minute bars, historical_ticks for historical "
-        "tick/trade data, and historical_auction_detail for opening-auction details."
-    ),
+    instructions="XTick market data MCP. XTick token can be supplied by MCP client header X-XTick-Token or server environment XTICK_TOKEN.",
 )
 
 
-def _token() -> str:
+async def _token(ctx: Context | None = None) -> str:
+    # Public MCP deployment: allow each client to provide its own XTick key.
+    if ctx is not None:
+        try:
+            token = ctx.request_context.request.headers.get("X-XTick-Token", "")
+            if token:
+                return token.strip()
+        except Exception:
+            pass
+
+    # Private deployment fallback.
     token = os.getenv("XTICK_TOKEN", "").strip()
-    if not token:
-        raise RuntimeError("XTICK_TOKEN environment variable is not configured")
-    return token
+    if token:
+        return token
+
+    raise RuntimeError(
+        "No XTick token provided. Configure MCP client header X-XTick-Token "
+        "or server environment variable XTICK_TOKEN."
+    )
 
 
-async def _get(path: str, params: dict[str, Any]) -> Any:
+async def _get(path: str, params: dict[str, Any], ctx: Context | None = None) -> Any:
     query = {k: v for k, v in params.items() if v is not None}
-    query["token"] = _token()
+    query["token"] = await _token(ctx)
+
     async with httpx.AsyncClient(base_url=BASE_URL, timeout=60.0) as client:
         response = await client.get(path, params=query)
         response.raise_for_status()
-        try:
-            return response.json()
-        except ValueError as exc:
-            raise RuntimeError(
-                f"XTick returned non-JSON (HTTP {response.status_code})"
-            ) from exc
+        return response.json()
 
 
 @mcp.tool
-async def credential_status() -> dict[str, Any]:
-    """Check whether XTICK_TOKEN is present without exposing its value."""
-    token = os.getenv("XTICK_TOKEN", "").strip()
-    return {"configured": bool(token), "source": "environment" if token else None}
+async def credential_status(ctx: Context) -> dict[str, Any]:
+    """Check whether an XTick credential was supplied without exposing it."""
+    try:
+        await _token(ctx)
+        return {"configured": True}
+    except Exception:
+        return {"configured": False}
 
 
 @mcp.tool
-async def daily_kline(
-    code: str,
-    start_date: str,
-    end_date: str,
-    market_type: int = 1,
-    fq: int = 1,
-) -> Any:
-    """Get historical daily K-line bars.
-
-    Dates use YYYY-MM-DD. market_type: 1=A-share, 2=index, 3=HK,
-    4=ETF, 5=convertible bond. fq: 1=unadjusted, 2=forward,
-    3=backward, 4=ratio-forward, 5=ratio-backward.
-    """
+async def daily_kline(code: str, start_date: str, end_date: str, ctx: Context, market_type: int = 1, fq: int = 1) -> Any:
+    """Get historical daily K-line data."""
     return await _get("/doc/kline/market", {
         "type": market_type,
         "code": code,
-        "fq": fq,
         "period": "1d",
+        "fq": fq,
         "startDate": start_date,
         "endDate": end_date,
-    })
+    }, ctx)
 
 
 @mcp.tool
-async def minute_kline(
-    code: str,
-    start_date: str,
-    end_date: str,
-    period: str = "1m",
-    market_type: int = 1,
-    fq: int = 1,
-) -> Any:
-    """Get historical minute K-line bars.
-
-    period must be one of 1m, 5m, 15m, 30m, 1h. XTick documents a
-    maximum 31-day span per request for minute data.
-    """
-    allowed = {"1m", "5m", "15m", "30m", "1h"}
-    if period not in allowed:
-        raise ValueError(f"period must be one of {sorted(allowed)}")
+async def minute_kline(code: str, start_date: str, end_date: str, ctx: Context, period: str = "1m", market_type: int = 1, fq: int = 1) -> Any:
+    """Get historical minute K-line data. Supported periods: 1m,5m,15m,30m,1h."""
     return await _get("/doc/kline/market", {
         "type": market_type,
         "code": code,
-        "fq": fq,
         "period": period,
+        "fq": fq,
         "startDate": start_date,
         "endDate": end_date,
-    })
+    }, ctx)
 
 
 @mcp.tool
-async def historical_ticks(
-    code: str,
-    trade_date: str,
-    market_type: int = 1,
-) -> Any:
-    """Get historical per-trade/tick data for one security and trading date.
-
-    trade_date uses YYYY-MM-DD.
-    """
+async def historical_ticks(code: str, trade_date: str, ctx: Context, market_type: int = 1) -> Any:
+    """Get historical tick/fenbi data."""
     return await _get("/doc/core/fenbi", {
         "type": market_type,
         "code": code,
         "tradeDate": trade_date,
-    })
+    }, ctx)
 
 
 @mcp.tool
-async def historical_auction_detail(
-    code: str,
-    trade_date: str,
-    market_type: int = 1,
-) -> Any:
-    """Get all opening call-auction detail records for one security/date.
-
-    XTick's biddetail endpoint is updated after the 09:25 opening auction.
-    trade_date uses YYYY-MM-DD.
-    """
+async def historical_auction_detail(code: str, trade_date: str, ctx: Context, market_type: int = 1) -> Any:
+    """Get historical opening auction detail."""
     return await _get("/doc/hot/biddetail", {
         "type": market_type,
         "code": code,
         "tradeDate": trade_date,
-    })
+    }, ctx)
 
 
 @mcp.tool
-async def auction_history(
-    code: str,
-    start_date: str,
-    end_date: str,
-    seq: int = 0,
-    market_type: int = 1,
-) -> Any:
-    """Get historical auction snapshots over a date range.
-
-    seq=0 returns the 09:25 record; seq=1 returns the previous auction record.
-    Use historical_auction_detail when all auction records for one date are needed.
-    """
-    if seq not in (0, 1):
-        raise ValueError("seq must be 0 or 1")
-    return await _get("/doc/hot/bidhistory", {
-        "type": market_type,
-        "code": code,
-        "seq": seq,
-        "startDate": start_date,
-        "endDate": end_date,
-    })
-
-
-@mcp.tool
-async def orderbook(code: str, market_type: int = 1) -> Any:
-    """Get the current five-level order book for a security."""
-    return await _get("/doc/order/five", {"type": market_type, "code": code})
-
-
-@mcp.tool
-async def historical_orderbook(
-    code: str,
-    trade_date: str,
-    market_type: int = 1,
-) -> Any:
-    """Get historical five-level/depth market data for one trading date."""
-    return await _get("/doc/order/history", {
-        "type": market_type,
-        "code": code,
-        "tradeDate": trade_date,
-    })
-
-
-@mcp.tool
-async def quant_data(
-    field: str = "all",
-    market_type: int = 1,
-) -> Any:
-    """Get real-time XTick quantitative factors. field may be all or selected fields."""
-    return await _get("/doc/quant/data", {"type": market_type, "field": field})
-
-
-@mcp.tool
-async def hot_news(minutes: int = 30, trade_date: str | None = None) -> Any:
-    """Get financial news. minutes>0 gets recent news; minutes=0 uses trade_date."""
-    return await _get("/doc/hot/news", {
-        "minutes": minutes,
-        "tradeDate": trade_date,
-    })
+async def orderbook(code: str, ctx: Context, market_type: int = 1) -> Any:
+    """Get current five-level order book."""
+    return await _get("/doc/order/five", {"type": market_type, "code": code}, ctx)
 
 
 if __name__ == "__main__":
