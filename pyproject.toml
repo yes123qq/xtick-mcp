@@ -1,12 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "xtick-mcp"
-version = "0.2.0"
+version = "0.3.0"
 description = "Read-only XTick market data MCP server for FastMCP"
 requires-python = ">=3.11"
 dependencies = [
-  "fastmcp>=2.0,<5",
+  "fastmcp>=2.14,<5",
   "httpx>=0.27,<1",
 ]
+
+[project.optional-dependencies]
+test = ["pytest>=8,<10", "pytest-asyncio>=0.24,<2"]
+
+[tool.setuptools]
+py-modules = ["server", "xtick_core"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+pythonpath = ["."]
 
 [tool.uv]
 package = false
